@@ -177,21 +177,28 @@ def extract_method_text(doc):
             nome_parts = []
 
             # tenta pegar conteúdo das próximas linhas
-            for j in range(i, min(i + 4, len(lines))):
+            for j in range(i, min(i + 6, len(lines))):
                 current = lines[j]
-
-                if j > i and CODE_RE.search(current) and parse_price(current) is not None:
+            
+                # se achou outro código, para
+                if j > i and CODE_RE.search(current):
                     break
-
+            
+                # se a linha parece começo de outro produto, para
+                if j > i and ("R$" in current and "CX" in current):
+                    break
+            
                 q = parse_qty(current)
                 if q and not quantidade:
                     quantidade = q
-
+            
                 # remove código/preço/qty para sobrar nome
                 candidate = normalize_name(current)
-                if candidate and candidate != codigo:
+            
+                # evita juntar lixo ou duplicar código
+                if candidate and candidate != codigo and len(candidate.split()) >= 2:
                     nome_parts.append(candidate)
-
+            
             nome = " ".join(dict.fromkeys(nome_parts))
             p = build_product(codigo, nome, preco, quantidade)
             if p:

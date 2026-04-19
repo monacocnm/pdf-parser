@@ -195,9 +195,30 @@ def extract_method_text(doc):
                 # remove código/preço/qty para sobrar nome
                 candidate = normalize_name(current)
             
-                # evita juntar lixo ou duplicar código
-                if candidate and candidate != codigo and len(candidate.split()) >= 2:
-                    nome_parts.append(candidate)
+               # 🔥 ignora lixo comum
+                if not candidate:
+                    continue
+                
+                if candidate == codigo:
+                    continue
+                
+                # 🔥 ignora linhas muito grandes (normalmente mistura de produtos)
+                if len(candidate) > 60:
+                    continue
+                
+                # 🔥 ignora linhas com muitos números (não é nome)
+                if sum(c.isdigit() for c in candidate) > 6:
+                    continue
+                
+                # 🔥 ignora linhas com múltiplos "CX" (mistura)
+                if candidate.count("CX") > 1:
+                    continue
+                
+                # 🔥 ignora palavras quebradas ou ruins
+                if len(candidate.split()) < 2:
+                    continue
+                
+                nome_parts.append(candidate)
             
             nome = " ".join(dict.fromkeys(nome_parts))
             p = build_product(codigo, nome, preco, quantidade)

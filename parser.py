@@ -1,46 +1,112 @@
 import fitz
 import re
-from collections import defaultdict
+from collections import defaultdict, Counter
+
+
+CODE_RE = re.compile(r"\b[A-Z]{1,4}\d?(?:-[A-Z0-9]+)+\b")
+PRICE_RE = re.compile(r"R\$\s*([0-9]+(?:[.,][0-9]{1,2})?)", re.IGNORECASE)
+QTY_RE = re.compile(r"([0-9]{1,5})\s*PC\s*/?\s*CX", re.IGNORECASE)
+
+BAD_ENDINGS = {"D", "E", "F", "PL", "COM", "DE", "PARA", "SEM", "A", "O", "DA", "DO"}
+BAD_WORDS = {"DE", "PARA", "COM", "SEM", "E", "EM", "A", "O", "DA", "DO"}
+
+
+def clean_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.upper()
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def normalize_name(name: str) -> str:
-    if not name:
-        return ""
+    name = clean_text(name)
 
-    name = name.upper()
-    name = re.sub(r"\s+", " ", name)
-    name = name.strip()
+    # remove preço embutido
+    name = re.sub(r"R\$\s*[0-9]+(?:[.,][0-9]{1,2})?", "", name, flags=re.IGNORECASE)
+
+    # remove quantidade
+    name = re.sub(r"[0-9]{1,5}\s*PC\s*/?\s*CX", "", name, flags=re.IGNORECASE)
+
+    # remove código de produto
+    name = CODE_RE.sub("", name)
+
+    # limpeza geral
+    name = re.sub(r"^[^A-Z0-9]+", "", name)
+    name = re.sub(r"[^A-Z0-9]+$", "", name)
+    name = re.sub(r"\s+", " ", name).strip()
 
     return name
 
 
-def score_name(name: str) -> int:
-    return len(name)
+def parse_price(text: str):
+    if not text:
+        return None
+    m = PRICE_RE.search(text)
+    if not m:
+        return None
+    raw = m.group(1).replace(",", ".")
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def parse_qty(text: str):
+    if not text:
+        return None
+    m = QTY_RE.search(text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
 
 
 def is_valid_name(name: str) -> bool:
     if not name:
         return False
 
-    words = name.split()
+    words = [w for w in name.split() if w]
 
-    if len(words) < 3:
+    if len(words) < 2:
         return False
 
-    if len(name) < 12:
+    if len(name) < 10:
         return False
 
-    # palavras ruins
-    bad_words = {"DE", "PARA", "COM", "SEM", "E", "EM", "A", "O"}
-
-    if all(w in bad_words for w in words):
+    if all(w in BAD_WORDS for w in words):
         return False
 
-    # 🔥 nome truncado no final
-    if words[-1] in {"D", "E", "F", "PL", "COM", "DE"}:
+    if words[-1] in BAD_ENDINGS:
+        return False
+
+    if sum(len(w) == 1 for w in words) >= 2:
         return False
 
     return True
+
+
+def score_name(name: str) -> int:
+    name = normalize_name(name)
+    if not name:
+        return -999
+
+    words = name.split()
+    score = len(name) + len(words) * 5
+
+    if len(words) <= 1:
+        score -= 20
+
+    if words and words[-1] in BAD_ENDINGS:
+        score -= 20
+
+    if re.search(r"\b[0-9]+\b", name):
+        score -= 5
+
+    return score
 
 
 def choose_best_name(names):
@@ -52,46 +118,84 @@ def choose_best_name(names):
             cleaned.append(nn)
 
     if not cleaned:
-        return ""
+        fallback = [normalize_name(n) for n in names if normalize_name(n)]
+        if not fallback:
+            return ""
+        unique = list(dict.fromkeys(fallback))
+        return max(unique, key=score_name)
 
     unique = list(dict.fromkeys(cleaned))
     return max(unique, key=score_name)
 
 
 def choose_best_price(prices):
-    prices = [p for p in prices if p]
-    return prices[0] if prices else 0
+    valid = [p for p in prices if isinstance(p, (int, float)) and p > 0]
+    if not valid:
+        return 0
+    return Counter(valid).most_common(1)[0][0]
 
 
 def choose_best_quantity(qtys):
-    qtys = [q for q in qtys if q]
-    return qtys[0] if qtys else None
+    valid = [q for q in qtys if isinstance(q, int) and q > 0]
+    if not valid:
+        return None
+    return Counter(valid).most_common(1)[0][0]
+
+
+def build_product(codigo, nome, preco=None, quantidade=None):
+    if not codigo:
+        return None
+
+    nome = normalize_name(nome)
+
+    if not is_valid_name(nome):
+        return None
+
+    return {
+        "codigo": codigo,
+        "nome": nome,
+        "preco": preco if preco is not None else 0,
+        "quantidade_caixa": quantidade
+    }
 
 
 def extract_method_text(doc):
     produtos = []
 
     for page in doc:
-        text = page.get_text()
-        linhas = text.split("\n")
+        lines = [clean_text(x) for x in page.get_text("text").splitlines() if clean_text(x)]
 
-        for linha in linhas:
-            match = re.search(r"([A-Z]-\d+(?:-\d+)*)", linha)
+        for i, line in enumerate(lines):
+            code_match = CODE_RE.search(line)
+            if not code_match:
+                continue
 
-            if match:
-                codigo = match.group(1)
+            codigo = code_match.group(0)
+            preco = parse_price(line)
+            quantidade = parse_qty(line)
 
-                preco_match = re.search(r"(\d+[.,]?\d*)", linha)
-                preco = float(preco_match.group(1)) if preco_match else None
+            nome_parts = []
 
-                nome = linha.replace(codigo, "").strip()
+            # tenta pegar conteúdo das próximas linhas
+            for j in range(i, min(i + 4, len(lines))):
+                current = lines[j]
 
-                produtos.append({
-                    "codigo": codigo,
-                    "nome": nome,
-                    "preco": preco,
-                    "quantidade_caixa": None
-                })
+                if j > i and CODE_RE.search(current) and parse_price(current) is not None:
+                    break
+
+                q = parse_qty(current)
+                if q and not quantidade:
+                    quantidade = q
+
+                # remove código/preço/qty para sobrar nome
+                candidate = normalize_name(current)
+                if candidate and candidate != codigo:
+                    nome_parts.append(candidate)
+
+            nome = " ".join(dict.fromkeys(nome_parts))
+            p = build_product(codigo, nome, preco, quantidade)
+            if p:
+                produtos.append(p)
 
     return produtos
 
@@ -101,50 +205,80 @@ def extract_method_blocks(doc):
 
     for page in doc:
         blocks = page.get_text("blocks")
+        parsed = []
 
         for b in blocks:
-            texto = b[4]
-
-            match = re.search(r"([A-Z]-\d+(?:-\d+)*)", texto)
-
-            if match:
-                codigo = match.group(1)
-
-                preco_match = re.search(r"(\d+[.,]?\d*)", texto)
-                preco = float(preco_match.group(1)) if preco_match else None
-
-                nome = texto.replace(codigo, "").strip()
-
-                produtos.append({
-                    "codigo": codigo,
-                    "nome": nome,
-                    "preco": preco,
-                    "quantidade_caixa": None
+            try:
+                x0, y0, x1, y1, text = b[:5]
+                txt = clean_text(text)
+                if not txt:
+                    continue
+                parsed.append({
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                    "text": txt,
                 })
+            except Exception:
+                continue
+
+        parsed.sort(key=lambda x: (round(x["y0"] / 10), x["x0"]))
+
+        for blk in parsed:
+            code_match = CODE_RE.search(blk["text"])
+            if not code_match:
+                continue
+
+            codigo = code_match.group(0)
+            preco = parse_price(blk["text"])
+            quantidade = parse_qty(blk["text"])
+
+            nome_parts = [normalize_name(blk["text"])]
+
+            for other in parsed:
+                same_column = abs(other["x0"] - blk["x0"]) < 140
+                below = 0 < (other["y0"] - blk["y1"]) < 180
+
+                if not (same_column and below):
+                    continue
+
+                if CODE_RE.search(other["text"]) and parse_price(other["text"]) is not None:
+                    continue
+
+                q = parse_qty(other["text"])
+                if q and not quantidade:
+                    quantidade = q
+                else:
+                    nome_parts.append(normalize_name(other["text"]))
+
+            nome = " ".join([x for x in nome_parts if x])
+            p = build_product(codigo, nome, preco, quantidade)
+            if p:
+                produtos.append(p)
 
     return produtos
 
 
-def extract_method_a(doc):
+def extract_method_words(doc):
     produtos = []
 
     for page in doc:
-        words = page.get_text("words")
+        text = clean_text(page.get_text("text"))
+        for match in CODE_RE.finditer(text):
+            codigo = match.group(0)
 
-        for w in words:
-            texto = w[4]
+            # pega uma janela de texto após o código
+            start = match.start()
+            snippet = text[start:start + 180]
 
-            match = re.match(r"([A-Z]-\d+(?:-\d+)*)", texto)
+            preco = parse_price(snippet)
+            quantidade = parse_qty(snippet)
 
-            if match:
-                codigo = match.group(1)
-
-                produtos.append({
-                    "codigo": codigo,
-                    "nome": texto,
-                    "preco": None,
-                    "quantidade_caixa": None
-                })
+            nome = normalize_name(snippet)
+            p = build_product(codigo, nome, preco, quantidade)
+            if p:
+                produtos.append(p)
 
     return produtos
 
@@ -155,9 +289,8 @@ def merge_produtos(*runs):
     for run in runs:
         for item in run:
             codigo = item.get("codigo")
-            if not codigo:
-                continue
-            agrupados[codigo].append(item)
+            if codigo:
+                agrupados[codigo].append(item)
 
     resultado = []
 
@@ -170,19 +303,11 @@ def merge_produtos(*runs):
         preco_final = choose_best_price(precos)
         quantidade_final = choose_best_quantity(quantidades)
 
-        # 🔥 FILTRO FINAL
-        if not nome_final:
+        if not is_valid_name(nome_final):
             continue
 
         palavras = nome_final.split()
-
-        if len(palavras) < 3:
-            continue
-
-        if len(nome_final) < 12:
-            continue
-
-        if all(len(p) <= 2 for p in palavras):
+        if len(palavras) < 2 or len(nome_final) < 10:
             continue
 
         resultado.append({
@@ -198,7 +323,7 @@ def merge_produtos(*runs):
 
 def parse_catalog_pdf(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    r1 = extract_method_a(doc)
+    r1 = extract_method_words(doc)
     doc.close()
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -209,5 +334,4 @@ def parse_catalog_pdf(pdf_bytes: bytes):
     r3 = extract_method_blocks(doc)
     doc.close()
 
-    final = merge_produtos(r1, r2, r3)
-    return final
+    return merge_produtos(r1, r2, r3)

@@ -77,7 +77,17 @@ QTY_RE = re.compile(r'(\d+)\s*PC\s*/?\s*CX', re.IGNORECASE)
 
 def build_product(codigo, nome, preco, quantidade):
     nome = normalize_name(nome)
+
     if not codigo or not nome:
+        return None
+
+    # 🔥 detecta nome incompleto
+    palavras = nome.split()
+
+    if palavras and palavras[-1] in {"D", "PL", "F", "C", "X"}:
+        return None  # descarta, provavelmente linha quebrada
+
+    if len(palavras) < 3:
         return None
 
     return {

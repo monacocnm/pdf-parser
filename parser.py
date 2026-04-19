@@ -11,12 +11,39 @@ IGNORE_PREFIXES = (
 )
 
 def clean_text(text: str) -> str:
-    text = text.replace("\n", " ").replace("  ", " ").strip()
-    return re.sub(r"\s+", " ", text)
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 def is_ignored(text: str) -> bool:
     upper = clean_text(text).upper()
     return any(upper.startswith(p) for p in IGNORE_PREFIXES)
+
+def clean_name(name: str) -> str:
+    name = clean_text(name)
+
+    # remove preços dentro do nome
+    name = re.sub(r'\b\d+\s*,\s*\d+\b', '', name)
+
+    # remove códigos misturados no nome
+    name = re.sub(r'\b[A-Z]{1,3}\d?(?:-[A-Z0-9]+)+\b', '', name)
+
+    # remove lixo comum
+    name = re.sub(r'[,$()]', '', name)
+    name = re.sub(r'\bPC\s*/?\s*CX\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bCX\b', '', name, flags=re.IGNORECASE)
+
+    # normaliza espaços
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    # descarta nomes inválidos
+    if len(name) < 5:
+        return ""
+
+    if re.fullmatch(r'[\d\s,\.]+', name):
+        return ""
+
+    return name
 
 def extract_products(pdf_path):
     doc = fitz.open(pdf_path)
@@ -37,7 +64,6 @@ def extract_products(pdf_path):
             price_match = PRICE_RE.search(text)
             qty_match = QTY_RE.search(text)
 
-            # bloco candidato: precisa ter preço ou quantidade ou código
             if code_match or price_match or qty_match:
                 page_items.append({
                     "x0": x0,
@@ -50,7 +76,6 @@ def extract_products(pdf_path):
                     "qty": int(qty_match.group(1)) if qty_match else None,
                 })
 
-        # ordena por posição visual
         page_items.sort(key=lambda i: (round(i["y0"] / 20), i["x0"]))
 
         used = set()
@@ -64,11 +89,9 @@ def extract_products(pdf_path):
             qty = item["qty"]
             name_parts = []
 
-            # só inicia produto se tiver código e preço no mesmo bloco
             if not code or price is None:
                 continue
 
-            # procurar blocos próximos abaixo para nome e quantidade
             for j, other in enumerate(page_items):
                 if j == i or j in used:
                     continue
@@ -77,7 +100,6 @@ def extract_products(pdf_path):
                 below = 0 < (other["y0"] - item["y1"]) < 140
 
                 if same_column and below:
-                    # se encontrou outro código+preço, é outro produto
                     if other["code"] and other["price"] is not None:
                         continue
 
@@ -86,33 +108,21 @@ def extract_products(pdf_path):
                         used.add(j)
                         continue
 
-                    # texto de nome
                     txt = other["text"]
                     if "R$" not in txt and "PC/CX" not in txt.upper():
                         name_parts.append(txt)
                         used.add(j)
 
-            name = clean_text(" ".join(name_parts))
+            name = clean_name(" ".join(name_parts))
 
-            # limpeza de sujeira no nome
-            name = re.sub(r'\d+\s*,\s*\d+', '', name)  # remove "8 ,00"
-            name = re.sub(r'[,$]', '', name)           # remove lixo
-            name = name.strip()
-
-            # descartar nomes ruins
-            if len(name) < 4 or name.replace(" ", "").isdigit():
-                name = ""
-            # fallback: tentar extrair nome do próprio bloco removendo código/preço
+            # fallback: tenta extrair nome do próprio bloco
             if not name:
                 temp = item["text"]
                 temp = temp.replace(code, "")
                 temp = re.sub(r'R\$\s*\d+(?:,\d{1,2})?', "", temp)
-                temp = re.sub(r'CX', "", temp, flags=re.IGNORECASE)
-                temp = clean_text(temp)
-                if len(temp.split()) >= 2:
-                    name = temp
+                temp = re.sub(r'\bCX\b', "", temp, flags=re.IGNORECASE)
+                name = clean_name(temp)
 
-            # filtro final
             if code and price is not None and name:
                 products.append({
                     "codigo": code,

@@ -25,26 +25,58 @@ def clean_name(name: str) -> str:
     name = re.sub(r'^[\d\s,\.]+', '', name)
     name = re.sub(r'[\d\s,\.]+$', '', name)
 
-    name = re.sub(r'[,$()/]', '', name)
+    name = re.sub(r'[,$()/\*\-]+', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip()
 
-    if len(name) < 4:
+    return name
+
+
+def normalize_name(name: str) -> str:
+    if not name:
         return ""
 
+    name = clean_name(name)
+    name = re.sub(r"\s+", " ", name).strip()
     return name
+
+
+def is_valid_name(name: str) -> bool:
+    if not name:
+        return False
+
+    words = [w for w in name.split() if w]
+
+    if len(words) < 2:
+        return False
+
+    if len(name) < 10:
+        return False
+
+    bad_words = {"DE", "PARA", "COM", "SEM", "E", "EM", "A", "O", "DA", "DO"}
+    if all(w in bad_words for w in words):
+        return False
+
+    if words[-1] in bad_words:
+        return False
+
+    # evita nomes só com siglas/quebras estranhas
+    if sum(len(w) == 1 for w in words) >= max(2, len(words) // 2):
+        return False
+
+    return True
 
 
 # =========================
 # REGEX BASE
 # =========================
 
-CODE_RE = re.compile(r'\b[A-Z]{1,3}\d?(?:-[A-Z0-9]+)+\b')
+CODE_RE = re.compile(r'\b[A-Z]{1,4}\d?(?:-[A-Z0-9]+)+\b')
 PRICE_RE = re.compile(r'R\$\s*([\d]+(?:,\d+)?)')
 QTY_RE = re.compile(r'(\d+)\s*PC\s*/?\s*CX', re.IGNORECASE)
 
 
 def build_product(codigo, nome, preco, quantidade):
-    nome = clean_name(nome)
+    nome = normalize_name(nome)
     if not codigo or not nome:
         return None
 
@@ -75,17 +107,22 @@ def extract_method_a(doc):
                 codigo = code_match.group(0)
                 preco = float(price_match.group(1).replace(",", "."))
 
-                nome = ""
+                nome_parts = []
                 quantidade = None
 
-                if i + 1 < len(lines):
-                    nome = lines[i + 1]
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    current = lines[j]
 
-                if i + 2 < len(lines):
-                    qty_match = QTY_RE.search(lines[i + 2])
+                    if CODE_RE.search(current) and PRICE_RE.search(current):
+                        break
+
+                    qty_match = QTY_RE.search(current)
                     if qty_match:
                         quantidade = int(qty_match.group(1))
+                    else:
+                        nome_parts.append(current)
 
+                nome = " ".join(nome_parts)
                 p = build_product(codigo, nome, preco, quantidade)
                 if p:
                     products.append(p)
@@ -102,11 +139,9 @@ def extract_method_text(doc):
 
     for page in doc:
         text = page.get_text("text")
-        chunks = text.split("\n")
+        chunks = [clean_text(c) for c in text.split("\n") if c.strip()]
 
         for i, line in enumerate(chunks):
-            line = clean_text(line)
-
             code_match = CODE_RE.search(line)
             price_match = PRICE_RE.search(line)
 
@@ -117,8 +152,8 @@ def extract_method_text(doc):
                 nome_parts = []
                 quantidade = None
 
-                for j in range(i + 1, min(i + 4, len(chunks))):
-                    nxt = clean_text(chunks[j])
+                for j in range(i + 1, min(i + 5, len(chunks))):
+                    nxt = chunks[j]
 
                     if CODE_RE.search(nxt) and PRICE_RE.search(nxt):
                         break
@@ -162,7 +197,7 @@ def extract_method_blocks(doc):
                 "text": txt
             })
 
-        parsed_blocks.sort(key=lambda x: (x["y0"], x["x0"]))
+        parsed_blocks.sort(key=lambda x: (round(x["y0"] / 10), x["x0"]))
 
         for blk in parsed_blocks:
             code_match = CODE_RE.search(blk["text"])
@@ -176,8 +211,8 @@ def extract_method_blocks(doc):
                 quantidade = None
 
                 for other in parsed_blocks:
-                    same_column = abs(other["x0"] - blk["x0"]) < 120
-                    below = 0 < (other["y0"] - blk["y1"]) < 160
+                    same_column = abs(other["x0"] - blk["x0"]) < 140
+                    below = 0 < (other["y0"] - blk["y1"]) < 180
 
                     if same_column and below:
                         if CODE_RE.search(other["text"]) and PRICE_RE.search(other["text"]):
@@ -201,31 +236,12 @@ def extract_method_blocks(doc):
 # MERGE INTELIGENTE
 # =========================
 
-def normalize_name(name: str) -> str:
-    if not name:
-        return ""
-
-    name = name.upper().strip()
-    name = re.sub(r"\s+", " ", name)
-
-    name = re.sub(r"\bCX\b", "", name)
-    name = re.sub(r"\bPC\/?CX\b", "", name)
-    name = re.sub(r"\b\d+\s*PC\/?CX\b", "", name)
-    name = re.sub(r"\b\d+\b$", "", name)
-    name = re.sub(r"^[\W\d]+", "", name)
-    name = re.sub(r"[\W]+$", "", name)
-    name = re.sub(r"\s+", " ", name).strip()
-
-    return name
-
-
 def score_name(name: str) -> int:
     name = normalize_name(name)
     if not name:
         return -999
 
     score = 0
-
     score += min(len(name), 80)
 
     words = [w for w in name.split() if w]
@@ -249,18 +265,26 @@ def score_name(name: str) -> int:
     if vowels < max(2, len(name) // 10):
         score -= 8
 
+    if not is_valid_name(name):
+        score -= 50
+
     return score
 
 
 def choose_best_name(names):
     cleaned = []
+
     for n in names:
         nn = normalize_name(n)
-        if nn:
+        if nn and is_valid_name(nn):
             cleaned.append(nn)
 
     if not cleaned:
-        return ""
+        # fallback: se todos forem ruins, pega o menos ruim
+        fallback = [normalize_name(n) for n in names if normalize_name(n)]
+        if not fallback:
+            return ""
+        return max(list(dict.fromkeys(fallback)), key=score_name)
 
     unique = list(dict.fromkeys(cleaned))
     best = max(unique, key=score_name)

@@ -266,13 +266,21 @@ def consolidate_products(*lists_of_products):
 # =========================
 
 def parse_catalog_pdf(pdf_bytes: bytes):
-    doc_a = fitz.open(stream=pdf_bytes, filetype="pdf")
-    doc_b = fitz.open(stream=pdf_bytes, filetype="pdf")
-    doc_c = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    result_a = extract_method_a(doc_a)
-    result_b = extract_method_text(doc_b)
-    result_c = extract_method_blocks(doc_c)
+    # método A
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    result_a = extract_method_a(doc)
+    doc.close()
+
+    # método B
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    result_b = extract_method_text(doc)
+    doc.close()
+
+    # método C
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    result_c = extract_method_blocks(doc)
+    doc.close()
 
     final = consolidate_products(result_a, result_b, result_c)
     return final

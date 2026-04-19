@@ -23,16 +23,10 @@ def clean_text(text: str) -> str:
 def normalize_name(name: str) -> str:
     name = clean_text(name)
 
-    # remove preço embutido
     name = re.sub(r"R\$\s*[0-9]+(?:[.,][0-9]{1,2})?", "", name, flags=re.IGNORECASE)
-
-    # remove quantidade
     name = re.sub(r"[0-9]{1,5}\s*PC\s*/?\s*CX", "", name, flags=re.IGNORECASE)
-
-    # remove código de produto
     name = CODE_RE.sub("", name)
 
-    # limpeza geral
     name = re.sub(r"^[^A-Z0-9]+", "", name)
     name = re.sub(r"[^A-Z0-9]+$", "", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -159,6 +153,34 @@ def build_product(codigo, nome, preco=None, quantidade=None):
     }
 
 
+def cut_mixed_product_name(nome: str) -> str:
+    """
+    Corta somente quando houver novo bloco de produto com CX,
+    mas preserva PC/CX.
+    Ex:
+      'CX MINI PROJETOR CX LOCALIZADOR DE PEIXES' -> 'MINI PROJETOR'
+      '70PC/CX MINI PROJETOR' -> mantém
+    """
+    if not nome:
+        return ""
+
+    nome = clean_text(nome)
+
+    # divide por CX somente quando NÃO vier depois de PC/
+    partes = re.split(r'(?<!PC/)\bCX\b', nome)
+    partes_limpas = [p.strip(" -:;,.()") for p in partes if p.strip(" -:;,.()")]
+
+    if len(partes_limpas) > 1:
+        nome = partes_limpas[0]
+    elif partes_limpas:
+        nome = partes_limpas[0]
+    else:
+        nome = nome.strip()
+
+    nome = re.sub(r'^\bCX\b\s*', '', nome).strip()
+    return nome
+
+
 def extract_method_text(doc):
     produtos = []
 
@@ -176,51 +198,41 @@ def extract_method_text(doc):
 
             nome_parts = []
 
-            # tenta pegar conteúdo das próximas linhas
             for j in range(i, min(i + 6, len(lines))):
                 current = lines[j]
-            
-                # se achou outro código, para
+
                 if j > i and CODE_RE.search(current):
                     break
-            
-                # se a linha parece começo de outro produto, para
+
                 if j > i and ("R$" in current and "CX" in current):
                     break
-            
+
                 q = parse_qty(current)
                 if q and not quantidade:
                     quantidade = q
-            
-                # remove código/preço/qty para sobrar nome
+
                 candidate = normalize_name(current)
-            
-               # 🔥 ignora lixo comum
+
                 if not candidate:
                     continue
-                
+
                 if candidate == codigo:
                     continue
-                
-                # 🔥 ignora linhas muito grandes (normalmente mistura de produtos)
-                if len(candidate) > 60:
+
+                if len(candidate) > 120:
                     continue
-                
-                # 🔥 ignora linhas com muitos números (não é nome)
-                if sum(c.isdigit() for c in candidate) > 6:
+
+                if sum(c.isdigit() for c in candidate) > 8:
                     continue
-                
-                # 🔥 ignora linhas com múltiplos "CX" (mistura)
-                if candidate.count("CX") > 1:
-                    continue
-                
-                # 🔥 ignora palavras quebradas ou ruins
+
                 if len(candidate.split()) < 2:
                     continue
-                
+
                 nome_parts.append(candidate)
-            
+
             nome = " ".join(dict.fromkeys(nome_parts))
+            nome = cut_mixed_product_name(nome)
+
             p = build_product(codigo, nome, preco, quantidade)
             if p:
                 produtos.append(p)
@@ -262,13 +274,19 @@ def extract_method_blocks(doc):
             preco = parse_price(blk["text"])
             quantidade = parse_qty(blk["text"])
 
-            nome_parts = [normalize_name(blk["text"])]
+            nome_parts = []
 
             for other in parsed:
                 same_column = abs(other["x0"] - blk["x0"]) < 140
-                below = 0 < (other["y0"] - blk["y1"]) < 180
+                below = 0 <= (other["y0"] - blk["y0"]) < 180
 
                 if not (same_column and below):
+                    continue
+
+                if other["text"] == blk["text"]:
+                    candidate = normalize_name(other["text"])
+                    if candidate:
+                        nome_parts.append(candidate)
                     continue
 
                 if CODE_RE.search(other["text"]) and parse_price(other["text"]) is not None:
@@ -278,9 +296,20 @@ def extract_method_blocks(doc):
                 if q and not quantidade:
                     quantidade = q
                 else:
-                    nome_parts.append(normalize_name(other["text"]))
+                    candidate = normalize_name(other["text"])
+                    if not candidate:
+                        continue
+                    if len(candidate) > 120:
+                        continue
+                    if candidate.count("CX") > 2:
+                        continue
+                    if len(candidate.split()) < 2:
+                        continue
+                    nome_parts.append(candidate)
 
-            nome = " ".join([x for x in nome_parts if x])
+            nome = " ".join(dict.fromkeys(nome_parts))
+            nome = cut_mixed_product_name(nome)
+
             p = build_product(codigo, nome, preco, quantidade)
             if p:
                 produtos.append(p)
@@ -293,10 +322,9 @@ def extract_method_words(doc):
 
     for page in doc:
         text = clean_text(page.get_text("text"))
+
         for match in CODE_RE.finditer(text):
             codigo = match.group(0)
-
-            # pega uma janela de texto após o código
             start = match.start()
             snippet = text[start:start + 180]
 
@@ -304,6 +332,8 @@ def extract_method_words(doc):
             quantidade = parse_qty(snippet)
 
             nome = normalize_name(snippet)
+            nome = cut_mixed_product_name(nome)
+
             p = build_product(codigo, nome, preco, quantidade)
             if p:
                 produtos.append(p)
@@ -323,7 +353,7 @@ def merge_produtos(*runs):
     resultado = []
 
     for codigo, itens in agrupados.items():
-        nomes = [i.get("nome", "") for i in itens]
+        nomes = [cut_mixed_product_name(i.get("nome", "")) for i in itens]
         precos = [i.get("preco") for i in itens]
         quantidades = [i.get("quantidade_caixa") for i in itens]
 

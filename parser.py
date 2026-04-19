@@ -22,21 +22,28 @@ def is_ignored(text: str) -> bool:
 def clean_name(name: str) -> str:
     name = clean_text(name)
 
-    # remove preços dentro do nome
+    # remove preços tipo 8,00
     name = re.sub(r'\b\d+\s*,\s*\d+\b', '', name)
 
-    # remove códigos misturados no nome
+    # remove códigos tipo W1-40
     name = re.sub(r'\b[A-Z]{1,3}\d?(?:-[A-Z0-9]+)+\b', '', name)
 
-    # remove lixo comum
-    name = re.sub(r'[,$()]', '', name)
-    name = re.sub(r'\bPC\s*/?\s*CX\b', '', name, flags=re.IGNORECASE)
+    # remove quantidade tipo 300PC/CX
+    name = re.sub(r'\b\d+\s*PC\s*/?\s*CX\b', '', name, flags=re.IGNORECASE)
+
+    # remove CX solto
     name = re.sub(r'\bCX\b', '', name, flags=re.IGNORECASE)
+
+    # 🔥 remove lixo numérico no início (ESSENCIAL)
+    name = re.sub(r'^[\d\s,\.]+', '', name)
+
+    # remove caracteres soltos
+    name = re.sub(r'[,$()]', '', name)
 
     # normaliza espaços
     name = re.sub(r'\s+', ' ', name).strip()
 
-    # descarta nomes inválidos
+    # descarta inválidos
     if len(name) < 5:
         return ""
 

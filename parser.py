@@ -94,6 +94,14 @@ def extract_products(pdf_path):
 
             name = clean_text(" ".join(name_parts))
 
+            # limpeza de sujeira no nome
+            name = re.sub(r'\d+\s*,\s*\d+', '', name)  # remove "8 ,00"
+            name = re.sub(r'[,$]', '', name)           # remove lixo
+            name = name.strip()
+
+            # descartar nomes ruins
+            if len(name) < 4 or name.replace(" ", "").isdigit():
+                name = ""
             # fallback: tentar extrair nome do próprio bloco removendo código/preço
             if not name:
                 temp = item["text"]

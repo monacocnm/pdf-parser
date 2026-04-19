@@ -326,7 +326,24 @@ def merge_produtos(*runs):
         preco_final = choose_best_price(precos)
         quantidade_final = choose_best_quantity(quantidades)
 
+        # 🔴 FILTRO FORTE (NOVO)
         if not nome_final:
+            continue
+
+        if len(nome_final) < 12:
+            continue
+
+        palavras = nome_final.split()
+
+        if len(palavras) < 3:
+            continue
+
+        # remove nomes tipo "X", "E", etc
+        if all(len(p) <= 2 for p in palavras):
+            continue
+
+        # remove nomes com muita sujeira
+        if sum(len(p) == 1 for p in palavras) >= 2:
             continue
 
         resultado.append({

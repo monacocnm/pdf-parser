@@ -23,10 +23,16 @@ def clean_text(text: str) -> str:
 def normalize_name(name: str) -> str:
     name = clean_text(name)
 
+    # remove preço
     name = re.sub(r"R\$\s*[0-9]+(?:[.,][0-9]{1,2})?", "", name, flags=re.IGNORECASE)
+
+    # remove quantidade por caixa
     name = re.sub(r"[0-9]{1,5}\s*PC\s*/?\s*CX", "", name, flags=re.IGNORECASE)
+
+    # remove código
     name = CODE_RE.sub("", name)
 
+    # limpeza geral
     name = re.sub(r"^[^A-Z0-9]+", "", name)
     name = re.sub(r"[^A-Z0-9]+$", "", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -80,6 +86,12 @@ def is_valid_name(name: str) -> bool:
     if sum(len(w) == 1 for w in words) >= 2:
         return False
 
+    if re.match(r"^[0-9\s,.\-]+$", name):
+        return False
+
+    if "UNI" in name and len(words) <= 3:
+        return False
+
     return True
 
 
@@ -100,6 +112,9 @@ def score_name(name: str) -> int:
     if re.search(r"\b[0-9]+\b", name):
         score -= 5
 
+    if len(words) > 12:
+        score -= 30
+
     return score
 
 
@@ -107,12 +122,13 @@ def choose_best_name(names):
     cleaned = []
 
     for n in names:
-        nn = normalize_name(n)
+        nn = cut_mixed_product_name(normalize_name(n))
         if nn and is_valid_name(nn):
             cleaned.append(nn)
 
     if not cleaned:
-        fallback = [normalize_name(n) for n in names if normalize_name(n)]
+        fallback = [cut_mixed_product_name(normalize_name(n)) for n in names if normalize_name(n)]
+        fallback = [f for f in fallback if f]
         if not fallback:
             return ""
         unique = list(dict.fromkeys(fallback))
@@ -136,13 +152,71 @@ def choose_best_quantity(qtys):
     return Counter(valid).most_common(1)[0][0]
 
 
+def cut_mixed_product_name(nome: str) -> str:
+    if not nome:
+        return ""
+
+    nome = clean_text(nome)
+
+    # 1) quebra por "CX" de novo produto, mas ignora PC/CX
+    partes = re.split(r"(?<!PC/)\bCX\b", nome)
+    partes = [p.strip(" -:;,.()") for p in partes if p.strip(" -:;,.()")]
+
+    if partes:
+        nome = partes[0]
+
+    # 2) se houver palavras que normalmente iniciam outro produto,
+    # mantém só até a segunda ocorrência
+    triggers = [
+        "SUPORTE", "CAMERA", "LUMINARIA", "PROJETOR", "BALANCA",
+        "KIT", "MINI", "LANTERNA", "FONE", "GARRAFA", "CAIXA",
+        "MOUSE", "TECLADO", "CANETA", "CABIDE", "BOLSA", "ROBO"
+    ]
+
+    words = nome.split()
+    if not words:
+        return ""
+
+    positions = []
+    for idx, word in enumerate(words):
+        if word in triggers:
+            positions.append(idx)
+
+    if len(positions) >= 2:
+        nome = " ".join(words[:positions[1]])
+
+    # 3) corta excesso em padrões claramente ruins
+    nome = re.sub(r"\(\)", "", nome)
+    nome = re.sub(r"\s+", " ", nome).strip()
+
+    # 4) remove prefixos numéricos sujos
+    nome = re.sub(r"^[0-9\s,.\-]+", "", nome).strip()
+
+    return nome
+
+
 def build_product(codigo, nome, preco=None, quantidade=None):
     if not codigo:
         return None
 
-    nome = normalize_name(nome)
+    nome = cut_mixed_product_name(normalize_name(nome))
 
-    if not is_valid_name(nome):
+    if not nome:
+        return None
+
+    if len(nome) < 10:
+        return None
+
+    if len(nome.split()) < 2:
+        return None
+
+    if re.match(r"^[0-9\s,.\-]+$", nome):
+        return None
+
+    if "UNI" in nome and len(nome.split()) <= 3:
+        return None
+
+    if nome.count(" ") > 12:
         return None
 
     return {
@@ -151,34 +225,6 @@ def build_product(codigo, nome, preco=None, quantidade=None):
         "preco": preco if preco is not None else 0,
         "quantidade_caixa": quantidade
     }
-
-
-def cut_mixed_product_name(nome: str) -> str:
-    """
-    Corta somente quando houver novo bloco de produto com CX,
-    mas preserva PC/CX.
-    Ex:
-      'CX MINI PROJETOR CX LOCALIZADOR DE PEIXES' -> 'MINI PROJETOR'
-      '70PC/CX MINI PROJETOR' -> mantém
-    """
-    if not nome:
-        return ""
-
-    nome = clean_text(nome)
-
-    # divide por CX somente quando NÃO vier depois de PC/
-    partes = re.split(r'(?<!PC/)\bCX\b', nome)
-    partes_limpas = [p.strip(" -:;,.()") for p in partes if p.strip(" -:;,.()")]
-
-    if len(partes_limpas) > 1:
-        nome = partes_limpas[0]
-    elif partes_limpas:
-        nome = partes_limpas[0]
-    else:
-        nome = nome.strip()
-
-    nome = re.sub(r'^\bCX\b\s*', '', nome).strip()
-    return nome
 
 
 def extract_method_text(doc):
@@ -301,8 +347,6 @@ def extract_method_blocks(doc):
                         continue
                     if len(candidate) > 120:
                         continue
-                    if candidate.count("CX") > 2:
-                        continue
                     if len(candidate.split()) < 2:
                         continue
                     nome_parts.append(candidate)
@@ -331,8 +375,7 @@ def extract_method_words(doc):
             preco = parse_price(snippet)
             quantidade = parse_qty(snippet)
 
-            nome = normalize_name(snippet)
-            nome = cut_mixed_product_name(nome)
+            nome = cut_mixed_product_name(normalize_name(snippet))
 
             p = build_product(codigo, nome, preco, quantidade)
             if p:

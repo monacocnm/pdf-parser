@@ -1,5 +1,5 @@
 fastapi
 uvicorn
 pymupdf
-python-multipart
-openai
+requests
+python-multipar

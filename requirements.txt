@@ -2,4 +2,4 @@ fastapi
 uvicorn
 pymupdf
 requests
-python-multipar
+python-multipart

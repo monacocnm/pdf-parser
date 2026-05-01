@@ -7,6 +7,7 @@ import json
 import base64
 import fitz
 import requests
+import gc
 
 
 app = FastAPI()
@@ -61,7 +62,7 @@ def limpar_json_ia(texto: str):
 @app.post("/parse-catalog-vision")
 async def parse_catalog_vision(
     file: UploadFile = File(...),
-    max_pages: int = Query(0, description="0 = processar todas as páginas")
+    max_pages: int = Query(3, description="Quantidade máxima de páginas para teste")
 ):
     try:
         openai_key = os.getenv("OPENAI_API_KEY")
@@ -78,14 +79,19 @@ async def parse_catalog_vision(
         produtos_finais = []
 
         total_pages = len(doc)
-        pages_to_process = total_pages if max_pages == 0 else min(max_pages, total_pages)
+
+        # Segurança para Render Free: nunca processar mais de 3 páginas por enquanto
+        pages_to_process = min(max_pages, 3, total_pages)
 
         for page_index in range(pages_to_process):
             page = doc[page_index]
 
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            # Resolução baixa para não estourar memória
+            pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
             img_bytes = pix.tobytes("png")
             img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+
+            del img_bytes
 
             prompt = """
 Extraia os produtos desta imagem de catálogo.
@@ -146,6 +152,10 @@ Regras:
                 timeout=120
             )
 
+            del img_base64
+            del pix
+            gc.collect()
+
             if response.status_code != 200:
                 produtos_finais.append({
                     "erro_pagina": page_index + 1,
@@ -177,6 +187,7 @@ Regras:
                 })
 
         doc.close()
+        gc.collect()
 
         return produtos_finais
 

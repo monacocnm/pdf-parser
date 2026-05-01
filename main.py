@@ -89,7 +89,7 @@ async def parse_catalog_vision(
             page = doc[page_index]
 
             # Resolução baixa para não estourar memória
-            pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
             img_bytes = pix.tobytes("png")
             img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 

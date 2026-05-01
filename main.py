@@ -81,7 +81,7 @@ async def parse_catalog_vision(
         total_pages = len(doc)
 
         # Segurança para Render Free: nunca processar mais de 3 páginas por enquanto
-        pages_to_process = min(max_pages, 3, total_pages)
+        pages_to_process = min(max_pages, 1, total_pages)
 
         for page_index in range(pages_to_process):
             page = doc[page_index]
@@ -139,7 +139,7 @@ Se houver múltiplos produtos, liste todos.
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-4o",
                     "response_format": {"type": "json_object"},
                     "messages": [
                         {

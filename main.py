@@ -94,13 +94,17 @@ async def parse_catalog_vision(
             del img_bytes
 
             prompt = """
-Extraia os produtos desta imagem de catálogo.
+Você está analisando um catálogo de produtos.
 
-Cada produto normalmente possui:
-- código
-- preço
-- nome
-- quantidade por caixa
+Cada produto aparece em blocos visuais com:
+- imagem
+- código (ex: Q-12-1, W1-34-1)
+- preço (ex: R$ 8,00)
+- nome do produto
+- quantidade por caixa (ex: 360PC/CX)
+
+Sua tarefa:
+Identificar TODOS os produtos visíveis na imagem.
 
 Retorne APENAS JSON válido neste formato:
 
@@ -115,13 +119,17 @@ Retorne APENAS JSON válido neste formato:
   ]
 }
 
-Regras:
-- Não invente produtos.
-- Se não encontrar código, ignore o item.
-- Preço deve ser número.
-- Quantidade por caixa deve ser número inteiro.
-- Remova "CX", "R$", "PC/CX" do nome.
-- Preserve nomes comerciais limpos.
+REGRAS IMPORTANTES:
+- Sempre retornar pelo menos 1 produto se houver na imagem
+- O código SEMPRE está próximo do preço
+- Preço deve ser número (sem R$)
+- Quantidade deve ser número inteiro
+- Ignore textos de cabeçalho
+- Ignore categorias (ex: PET, FITNESS, etc)
+- Foque nos blocos com imagem de produto
+- Não invente dados
+
+Se houver múltiplos produtos, liste todos.
 """
 
             response = requests.post(

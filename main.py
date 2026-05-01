@@ -62,7 +62,8 @@ def limpar_json_ia(texto: str):
 @app.post("/parse-catalog-vision")
 async def parse_catalog_vision(
     file: UploadFile = File(...),
-    max_pages: int = Query(3, description="Quantidade máxima de páginas para teste")
+    start_page: int = Query(1, description="Página inicial, começando em 1"),
+    max_pages: int = Query(1, description="Quantidade de páginas para processar")
 ):
     try:
         openai_key = os.getenv("OPENAI_API_KEY")
@@ -81,9 +82,10 @@ async def parse_catalog_vision(
         total_pages = len(doc)
 
         # Segurança para Render Free: nunca processar mais de 3 páginas por enquanto
-        pages_to_process = min(max_pages, 1, total_pages)
+        start_index = max(start_page - 1, 0)
+        end_index = min(start_index + max_pages, total_pages)
 
-        for page_index in range(pages_to_process):
+        for page_index in range(start_index, end_index):
             page = doc[page_index]
 
             # Resolução baixa para não estourar memória

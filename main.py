@@ -33,25 +33,24 @@ async def parse_catalog(file: UploadFile = File(...)):
     return result
 
 
+# 🔥 Parser robusto de JSON da IA
 def limpar_json_ia(texto: str):
     if not texto:
         return []
 
     texto = texto.strip()
 
-    if texto.startswith("```json"):
-        texto = texto.replace("```json", "").replace("```", "").strip()
+    inicio = texto.find("{")
+    fim = texto.rfind("}")
 
-    if texto.startswith("```"):
-        texto = texto.replace("```", "").strip()
+    if inicio != -1 and fim != -1:
+        texto = texto[inicio:fim+1]
 
     try:
         data = json.loads(texto)
     except Exception:
+        print("❌ ERRO AO PARSEAR JSON:", texto)
         return []
-
-    if isinstance(data, list):
-        return data
 
     if isinstance(data, dict) and "produtos" in data:
         return data["produtos"]
@@ -62,7 +61,7 @@ def limpar_json_ia(texto: str):
 @app.post("/parse-catalog-vision")
 async def parse_catalog_vision(
     file: UploadFile = File(...),
-    start_page: int = Query(1, description="Página inicial, começando em 1"),
+    start_page: int = Query(1, description="Página inicial (começa em 1)"),
     max_pages: int = Query(1, description="Quantidade de páginas para processar")
 ):
     try:
@@ -81,18 +80,25 @@ async def parse_catalog_vision(
 
         total_pages = len(doc)
 
-        # Segurança para Render Free: nunca processar mais de 3 páginas por enquanto
+        # 🔥 Controle de páginas
         start_index = max(start_page - 1, 0)
         end_index = min(start_index + max_pages, total_pages)
 
         for page_index in range(start_index, end_index):
             page = doc[page_index]
 
-            # Resolução baixa para não estourar memória
+            # 🔥 resolução balanceada
             pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
             img_bytes = pix.tobytes("png")
-            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
+            # 🔥 fallback se imagem ficar muito grande
+            if len(img_bytes) > 800000:
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+                img_bytes = pix.tobytes("png")
+
+            print(f"📄 Página {page_index+1} tamanho:", len(img_bytes))
+
+            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
             del img_bytes
 
             prompt = """
@@ -100,15 +106,12 @@ Você está analisando um catálogo de produtos.
 
 Cada produto aparece em blocos visuais com:
 - imagem
-- código (ex: Q-12-1, W1-34-1)
+- código (ex: Q-12-1)
 - preço (ex: R$ 8,00)
-- nome do produto
+- nome
 - quantidade por caixa (ex: 360PC/CX)
 
-Sua tarefa:
-Identificar TODOS os produtos visíveis na imagem.
-
-Retorne APENAS JSON válido neste formato:
+Retorne APENAS JSON válido:
 
 {
   "produtos": [
@@ -121,17 +124,11 @@ Retorne APENAS JSON válido neste formato:
   ]
 }
 
-REGRAS IMPORTANTES:
-- Sempre retornar pelo menos 1 produto se houver na imagem
-- O código SEMPRE está próximo do preço
-- Preço deve ser número (sem R$)
-- Quantidade deve ser número inteiro
-- Ignore textos de cabeçalho
-- Ignore categorias (ex: PET, FITNESS, etc)
-- Foque nos blocos com imagem de produto
-- Não invente dados
-
-Se houver múltiplos produtos, liste todos.
+REGRAS:
+- Sempre retornar produtos se existirem
+- Não inventar dados
+- Ignorar cabeçalhos
+- Focar nos blocos com imagem de produto
 """
 
             response = requests.post(
@@ -167,15 +164,13 @@ Se houver múltiplos produtos, liste todos.
             gc.collect()
 
             if response.status_code != 200:
-                produtos_finais.append({
-                    "erro_pagina": page_index + 1,
-                    "status_code": response.status_code,
-                    "detalhe": response.text
-                })
+                print("❌ ERRO OPENAI:", response.text)
                 continue
 
             data = response.json()
             content = data["choices"][0]["message"]["content"]
+
+            print("🧠 RESPOSTA IA:", content)
 
             produtos_pagina = limpar_json_ia(content)
 

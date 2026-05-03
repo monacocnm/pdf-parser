@@ -82,7 +82,7 @@ async def parse_catalog_vision(
 
         # 🔥 Controle de páginas
         start_index = max(start_page - 1, 0)
-        end_index = min(start_index + max_pages, total_pages)
+        end_index = min(start_index + min(max_pages, 5), total_pages)
 
         for page_index in range(start_index, end_index):
             page = doc[page_index]

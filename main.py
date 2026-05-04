@@ -8,6 +8,7 @@ import base64
 import fitz
 import requests
 import gc
+import re
 
 
 app = FastAPI()
@@ -29,192 +30,338 @@ def home():
 @app.post("/parse-catalog")
 async def parse_catalog(file: UploadFile = File(...)):
     contents = await file.read()
-    result = parse_catalog_pdf(contents)
-    return result
+    return parse_catalog_pdf(contents)
 
 
-# 🔥 Parser robusto
 def limpar_json_ia(texto: str):
     if not texto:
         return []
 
     texto = texto.strip()
-
     inicio = texto.find("{")
     fim = texto.rfind("}")
 
     if inicio != -1 and fim != -1:
-        texto = texto[inicio:fim+1]
+        texto = texto[inicio:fim + 1]
 
     try:
         data = json.loads(texto)
     except Exception:
-        print("❌ ERRO AO PARSEAR JSON:", texto)
+        print("ERRO JSON IA:", texto)
         return []
 
     if isinstance(data, dict) and "produtos" in data:
         return data["produtos"]
 
+    if isinstance(data, list):
+        return data
+
     return []
+
+
+def normalizar_preco(valor):
+    if valor is None:
+        return None
+
+    if isinstance(valor, (int, float)):
+        return float(valor)
+
+    texto = str(valor)
+    texto = texto.replace("R$", "").replace(" ", "")
+    texto = texto.replace(".", "").replace(",", ".")
+
+    try:
+        return float(texto)
+    except Exception:
+        return None
+
+
+def normalizar_quantidade(valor):
+    if valor is None:
+        return None
+
+    if isinstance(valor, int):
+        return valor
+
+    texto = str(valor)
+    nums = re.findall(r"\d+", texto)
+
+    if not nums:
+        return None
+
+    return int(nums[0])
+
+
+def normalizar_nome(nome: str):
+    if not nome:
+        return ""
+
+    nome = str(nome).strip()
+    nome = re.sub(r"\s+", " ", nome)
+
+    correcoes = {
+        "pivot": "bivolt",
+        "proyector": "projetor",
+        "projeyor": "projetor",
+        "bluetooh": "bluetooth",
+        "portatil": "portátil",
+        "cotoveloeira": "cotoveleira",
+    }
+
+    texto = nome.lower()
+
+    for errado, certo in correcoes.items():
+        texto = texto.replace(errado, certo)
+
+    return texto.title()
+
+
+def produto_valido(produto, ignorar_lista):
+    codigo = str(produto.get("codigo", "")).strip()
+    nome = str(produto.get("nome", "")).strip()
+    preco = normalizar_preco(produto.get("preco"))
+    quantidade = normalizar_quantidade(produto.get("quantidade_caixa"))
+
+    if not codigo or not nome:
+        return None
+
+    texto_check = f"{codigo} {nome}".lower()
+
+    for palavra in ignorar_lista:
+        if palavra and palavra.lower().strip() in texto_check:
+            return None
+
+    if preco is None or preco <= 0:
+        return None
+
+    if quantidade is None or quantidade <= 0:
+        return None
+
+    return {
+        "codigo": codigo,
+        "nome": normalizar_nome(nome),
+        "preco": preco,
+        "quantidade_caixa": quantidade,
+    }
+
+
+def chamar_ia(openai_key: str, img_base64: str, modo_bloco: bool):
+    if modo_bloco:
+        contexto = "A imagem contém UM ÚNICO bloco de produto, ou pode estar vazia."
+    else:
+        contexto = "A imagem contém uma página inteira de catálogo com vários produtos."
+
+    prompt = f"""
+Você está analisando catálogo de produtos.
+
+{contexto}
+
+Extraia produtos com:
+- código
+- nome
+- preço
+- quantidade por caixa
+
+Retorne APENAS JSON válido neste formato:
+
+{{
+  "produtos": [
+    {{
+      "codigo": "YA24014",
+      "nome": "Bola Yoga com Bomba",
+      "preco": 30,
+      "quantidade_caixa": 50
+    }}
+  ]
+}}
+
+REGRAS:
+- Não invente produtos.
+- Não misture produtos diferentes.
+- Ignore cabeçalhos, categorias e textos promocionais.
+- Ignore itens sem preço.
+- Ignore itens marcados apenas como reposição.
+- O nome não deve conter código, preço, CX ou quantidade.
+- Preço deve ser número.
+- Quantidade deve ser número inteiro.
+"""
+
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "gpt-4o",
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_base64}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+        },
+        timeout=120,
+    )
+
+    if response.status_code != 200:
+        print("ERRO OPENAI:", response.text)
+        return []
+
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    print("RESPOSTA IA:", content)
+
+    return limpar_json_ia(content)
 
 
 @app.post("/parse-catalog-vision")
 async def parse_catalog_vision(
     file: UploadFile = File(...),
+
     start_page: int = Query(1),
-    max_pages: int = Query(1)
+    max_pages: int = Query(1),
+
+    layout: str = Query("blocos"),
+    colunas: int = Query(3),
+    linhas: int = Query(2),
+
+    top_crop_pct: float = Query(0.0),
+    bottom_crop_pct: float = Query(0.0),
+
+    ignorar_palavras: str = Query("reposicao,reposição,novidades,categoria")
 ):
     try:
         openai_key = os.getenv("OPENAI_API_KEY")
 
         if not openai_key:
-            return {"status": "error", "message": "API KEY não configurada"}
+            return {
+                "status": "error",
+                "message": "OPENAI_API_KEY não configurada no Render",
+            }
 
         pdf_bytes = await file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-        produtos_finais = []
 
         total_pages = len(doc)
 
         start_index = max(start_page - 1, 0)
         end_index = min(start_index + max_pages, total_pages)
 
+        ignorar_lista = [
+            p.strip().lower()
+            for p in ignorar_palavras.split(",")
+            if p.strip()
+        ]
+
+        produtos_por_codigo = {}
+
         for page_index in range(start_index, end_index):
             page = doc[page_index]
-
             page_rect = page.rect
-            width = page_rect.width
-            height = page_rect.height
 
-            cols = 3
-            rows = 2
+            usable_y0 = page_rect.y0 + (page_rect.height * top_crop_pct)
+            usable_y1 = page_rect.y1 - (page_rect.height * bottom_crop_pct)
 
-            block_width = width / cols
-            block_height = height / rows
+            usable_rect = fitz.Rect(
+                page_rect.x0,
+                usable_y0,
+                page_rect.x1,
+                usable_y1,
+            )
 
-            for row in range(rows):
-                for col in range(cols):
+            print(f"Processando página {page_index + 1} layout={layout}")
 
-                    rect = fitz.Rect(
-                        col * block_width,
-                        row * block_height,
-                        (col + 1) * block_width,
-                        (row + 1) * block_height
-                    )
+            if layout == "pagina_inteira":
+                pix = page.get_pixmap(
+                    matrix=fitz.Matrix(1.5, 1.5),
+                    clip=usable_rect,
+                    alpha=False,
+                )
 
-                    pix = page.get_pixmap(
-                        matrix=fitz.Matrix(1.5, 1.5),
-                        clip=rect,
-                        alpha=False
-                    )
+                img_bytes = pix.tobytes("png")
+                img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-                    img_bytes = pix.tobytes("png")
+                del img_bytes
 
-                    # 🔥 ignora bloco vazio
-                    if len(img_bytes) < 20000:
-                        continue
+                produtos_ia = chamar_ia(
+                    openai_key=openai_key,
+                    img_base64=img_base64,
+                    modo_bloco=False,
+                )
 
-                    print(f"📦 Página {page_index+1} bloco {row}-{col} tamanho:", len(img_bytes))
+                del img_base64
+                del pix
+                gc.collect()
 
-                    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-                    del img_bytes
+                for item in produtos_ia:
+                    produto = produto_valido(item, ignorar_lista)
+                    if produto:
+                        produtos_por_codigo[produto["codigo"]] = produto
 
-                    prompt = """
-Você está analisando UM ÚNICO produto de catálogo.
+            else:
+                block_width = usable_rect.width / colunas
+                block_height = usable_rect.height / linhas
 
-⚠️ IMPORTANTE:
-Esta imagem contém apenas um produto (ou pode estar vazia).
+                for row in range(linhas):
+                    for col in range(colunas):
+                        rect = fitz.Rect(
+                            usable_rect.x0 + col * block_width,
+                            usable_rect.y0 + row * block_height,
+                            usable_rect.x0 + (col + 1) * block_width,
+                            usable_rect.y0 + (row + 1) * block_height,
+                        )
 
-Extraia apenas se existir produto claro.
+                        pix = page.get_pixmap(
+                            matrix=fitz.Matrix(1.5, 1.5),
+                            clip=rect,
+                            alpha=False,
+                        )
 
-Retorne JSON:
+                        img_bytes = pix.tobytes("png")
 
-{
-  "produtos": [
-    {
-      "codigo": "string",
-      "nome": "string",
-      "preco": number,
-      "quantidade_caixa": number
-    }
-  ]
-}
-
-REGRAS:
-- NÃO misturar produtos
-- NÃO inventar dados
-- Se não tiver produto claro → retornar vazio
-- Nome deve ser limpo (sem preço, código ou quantidade)
-"""
-
-                    response = requests.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {openai_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "gpt-4o",
-                            "response_format": {"type": "json_object"},
-                            "messages": [
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": prompt},
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {
-                                                "url": f"data:image/png;base64,{img_base64}"
-                                            }
-                                        }
-                                    ]
-                                }
-                            ],
-                            "temperature": 0
-                        },
-                        timeout=120
-                    )
-
-                    del img_base64
-                    del pix
-                    gc.collect()
-
-                    if response.status_code != 200:
-                        print("❌ ERRO OPENAI:", response.text)
-                        continue
-
-                    data = response.json()
-                    content = data["choices"][0]["message"]["content"]
-
-                    print("🧠 RESPOSTA IA:", content)
-
-                    produtos_pagina = limpar_json_ia(content)
-
-                    for produto in produtos_pagina:
-                        if not isinstance(produto, dict):
+                        if len(img_bytes) < 15000:
+                            del img_bytes
+                            del pix
                             continue
 
-                        codigo = produto.get("codigo")
-                        nome = produto.get("nome")
+                        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-                        if not codigo or not nome:
-                            continue
+                        del img_bytes
 
-                        produtos_finais.append({
-                            "codigo": str(codigo).strip(),
-                            "nome": str(nome).strip(),
-                            "preco": produto.get("preco", 0),
-                            "quantidade_caixa": produto.get("quantidade_caixa")
-                        })
+                        produtos_ia = chamar_ia(
+                            openai_key=openai_key,
+                            img_base64=img_base64,
+                            modo_bloco=True,
+                        )
+
+                        del img_base64
+                        del pix
+                        gc.collect()
+
+                        for item in produtos_ia:
+                            produto = produto_valido(item, ignorar_lista)
+                            if produto:
+                                produtos_por_codigo[produto["codigo"]] = produto
 
         doc.close()
         gc.collect()
 
-        return produtos_finais
+        return list(produtos_por_codigo.values())
 
     except Exception as e:
+        print("ERRO GERAL:", str(e))
         return {
             "status": "error",
-            "message": str(e)
+            "message": str(e),
         }

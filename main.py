@@ -102,33 +102,86 @@ async def parse_catalog_vision(
             del img_bytes
 
             prompt = """
-Você está analisando um catálogo de produtos.
+Você está analisando uma página de catálogo de produtos.
 
-Cada produto aparece em blocos visuais com:
-- imagem
-- código (ex: Q-12-1)
-- preço (ex: R$ 8,00)
-- nome
-- quantidade por caixa (ex: 360PC/CX)
+A página contém vários produtos organizados em blocos visuais (grade com colunas e linhas).
 
-Retorne APENAS JSON válido:
+⚠️ REGRAS IMPORTANTES:
 
-{
-  "produtos": [
-    {
-      "codigo": "Q-12-1",
-      "nome": "Coleira guia refletiva",
-      "preco": 8,
-      "quantidade_caixa": 360
-    }
-  ]
-}
+1. Cada produto deve ser extraído separadamente.
+2. NÃO misture informações de produtos diferentes.
+3. NÃO junte textos de blocos distintos.
+4. Cada produto é um bloco independente com:
+   - código
+   - nome
+   - preço
+   - quantidade por caixa
 
-REGRAS:
-- Sempre retornar produtos se existirem
-- Não inventar dados
-- Ignorar cabeçalhos
-- Focar nos blocos com imagem de produto
+---
+
+### IDENTIFICAÇÃO DO PRODUTO
+
+Cada produto normalmente segue este padrão visual:
+
+- Código: formato como "Q-12", "W1-34-1", etc
+- Nome: texto descritivo logo abaixo ou próximo da imagem
+- Preço: valor com "R$"
+- Quantidade: algo como "(100PC/CX)" ou "(30PC/CX)"
+
+---
+
+### REGRAS DE EXTRAÇÃO
+
+✔ Nome do produto:
+- NÃO incluir preço
+- NÃO incluir código
+- NÃO incluir quantidade
+- NÃO incluir textos promocionais
+- NÃO incluir símbolos estranhos
+
+✔ Preço:
+- extrair apenas número (ex: 8.00, 45.00)
+
+✔ Quantidade:
+- extrair apenas número (ex: 100, 30)
+
+✔ Código:
+- manter exatamente como aparece
+
+---
+
+### MUITO IMPORTANTE
+
+❌ NÃO FAÇA ISSO:
+- "Produto1 Produto2 Produto3" (misturado)
+- incluir "R$" no nome
+- incluir partes de outro produto
+
+✔ CADA ITEM DEVE SER ISOLADO
+
+---
+
+### FORMATO DE SAÍDA (OBRIGATÓRIO)
+
+Retorne apenas JSON válido:
+
+[
+  {
+    "codigo": "string",
+    "nome": "string",
+    "preco": number,
+    "quantidade_caixa": number
+  }
+]
+
+---
+
+### VALIDAÇÃO
+
+Se um produto estiver incompleto ou confuso:
+→ IGNORE esse produto
+
+Qualidade é mais importante que quantidade.
 """
 
             response = requests.post(

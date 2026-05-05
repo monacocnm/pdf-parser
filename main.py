@@ -83,9 +83,7 @@ def normalizar_quantidade(valor):
     if isinstance(valor, int):
         return valor
 
-    texto = str(valor)
-    nums = re.findall(r"\d+", texto)
-
+    nums = re.findall(r"\d+", str(valor))
     if not nums:
         return None
 
@@ -96,19 +94,19 @@ def normalizar_nome(nome: str):
     if not nome:
         return ""
 
-    nome = str(nome).strip()
-    nome = re.sub(r"\s+", " ", nome)
+    texto = str(nome).strip()
+    texto = re.sub(r"\s+", " ", texto)
 
     correcoes = {
         "pivot": "bivolt",
-        "proyector": "projetor",
         "projeyor": "projetor",
+        "proyector": "projetor",
         "bluetooh": "bluetooth",
         "portatil": "portátil",
         "cotoveloeira": "cotoveleira",
     }
 
-    texto = nome.lower()
+    texto = texto.lower()
 
     for errado, certo in correcoes.items():
         texto = texto.replace(errado, certo)
@@ -146,10 +144,11 @@ def produto_valido(produto, ignorar_lista):
 
 
 def chamar_ia(openai_key: str, img_base64: str, modo_bloco: bool):
-    if modo_bloco:
-        contexto = "A imagem contém UM ÚNICO bloco de produto, ou pode estar vazia."
-    else:
-        contexto = "A imagem contém uma página inteira de catálogo com vários produtos."
+    contexto = (
+        "A imagem contém UM ÚNICO bloco de produto, ou pode estar vazia."
+        if modo_bloco
+        else "A imagem contém uma página inteira de catálogo com vários produtos."
+    )
 
     prompt = f"""
 Você está analisando catálogo de produtos.
@@ -220,9 +219,110 @@ REGRAS:
 
     data = response.json()
     content = data["choices"][0]["message"]["content"]
+
     print("RESPOSTA IA:", content)
 
     return limpar_json_ia(content)
+
+
+def processar_pagina(
+    doc,
+    page_index,
+    openai_key,
+    layout,
+    colunas,
+    linhas,
+    top_crop_pct,
+    bottom_crop_pct,
+    ignorar_lista,
+):
+    page = doc[page_index]
+    page_rect = page.rect
+
+    usable_y0 = page_rect.y0 + (page_rect.height * top_crop_pct)
+    usable_y1 = page_rect.y1 - (page_rect.height * bottom_crop_pct)
+
+    usable_rect = fitz.Rect(
+        page_rect.x0,
+        usable_y0,
+        page_rect.x1,
+        usable_y1,
+    )
+
+    produtos_por_codigo = {}
+
+    if layout == "pagina_inteira":
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(1.5, 1.5),
+            clip=usable_rect,
+            alpha=False,
+        )
+
+        img_bytes = pix.tobytes("png")
+        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        del img_bytes
+
+        produtos_ia = chamar_ia(
+            openai_key=openai_key,
+            img_base64=img_base64,
+            modo_bloco=False,
+        )
+
+        del img_base64
+        del pix
+        gc.collect()
+
+        for item in produtos_ia:
+            produto = produto_valido(item, ignorar_lista)
+            if produto:
+                produtos_por_codigo[produto["codigo"]] = produto
+
+    else:
+        block_width = usable_rect.width / colunas
+        block_height = usable_rect.height / linhas
+
+        for row in range(linhas):
+            for col in range(colunas):
+                rect = fitz.Rect(
+                    usable_rect.x0 + col * block_width,
+                    usable_rect.y0 + row * block_height,
+                    usable_rect.x0 + (col + 1) * block_width,
+                    usable_rect.y0 + (row + 1) * block_height,
+                )
+
+                pix = page.get_pixmap(
+                    matrix=fitz.Matrix(1.5, 1.5),
+                    clip=rect,
+                    alpha=False,
+                )
+
+                img_bytes = pix.tobytes("png")
+
+                if len(img_bytes) < 15000:
+                    del img_bytes
+                    del pix
+                    continue
+
+                img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+                del img_bytes
+
+                produtos_ia = chamar_ia(
+                    openai_key=openai_key,
+                    img_base64=img_base64,
+                    modo_bloco=True,
+                )
+
+                del img_base64
+                del pix
+                gc.collect()
+
+                for item in produtos_ia:
+                    produto = produto_valido(item, ignorar_lista)
+                    if produto:
+                        produtos_por_codigo[produto["codigo"]] = produto
+
+    return list(produtos_por_codigo.values())
 
 
 @app.post("/parse-catalog-vision")
@@ -242,7 +342,7 @@ async def parse_catalog_vision(
     auto_crop: bool = Query(False),
     test_page: int = Query(1),
 
-    ignorar_palavras: str = Query("reposicao,reposição,novidades,categoria")
+    ignorar_palavras: str = Query("reposicao,reposição,novidades,categoria"),
 ):
     try:
         openai_key = os.getenv("OPENAI_API_KEY")
@@ -264,100 +364,7 @@ async def parse_catalog_vision(
             if p.strip()
         ]
 
-        def processar_pagina(page_index, top_crop, bottom_crop):
-            page = doc[page_index]
-            page_rect = page.rect
-
-            usable_y0 = page_rect.y0 + (page_rect.height * top_crop)
-            usable_y1 = page_rect.y1 - (page_rect.height * bottom_crop)
-
-            usable_rect = fitz.Rect(
-                page_rect.x0,
-                usable_y0,
-                page_rect.x1,
-                usable_y1,
-            )
-
-            produtos_por_codigo = {}
-
-            if layout == "pagina_inteira":
-                pix = page.get_pixmap(
-                    matrix=fitz.Matrix(1.5, 1.5),
-                    clip=usable_rect,
-                    alpha=False,
-                )
-
-                img_bytes = pix.tobytes("png")
-                img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-
-                del img_bytes
-
-                produtos_ia = chamar_ia(
-                    openai_key=openai_key,
-                    img_base64=img_base64,
-                    modo_bloco=False,
-                )
-
-                del img_base64
-                del pix
-                gc.collect()
-
-                for item in produtos_ia:
-                    produto = produto_valido(item, ignorar_lista)
-                    if produto:
-                        produtos_por_codigo[produto["codigo"]] = produto
-
-            else:
-                block_width = usable_rect.width / colunas
-                block_height = usable_rect.height / linhas
-
-                for row in range(linhas):
-                    for col in range(colunas):
-                        rect = fitz.Rect(
-                            usable_rect.x0 + col * block_width,
-                            usable_rect.y0 + row * block_height,
-                            usable_rect.x0 + (col + 1) * block_width,
-                            usable_rect.y0 + (row + 1) * block_height,
-                        )
-
-                        pix = page.get_pixmap(
-                            matrix=fitz.Matrix(1.5, 1.5),
-                            clip=rect,
-                            alpha=False,
-                        )
-
-                        img_bytes = pix.tobytes("png")
-
-                        if len(img_bytes) < 15000:
-                            del img_bytes
-                            del pix
-                            continue
-
-                        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-                        del img_bytes
-
-                        produtos_ia = chamar_ia(
-                            openai_key=openai_key,
-                            img_base64=img_base64,
-                            modo_bloco=True,
-                        )
-
-                        del img_base64
-                        del pix
-                        gc.collect()
-
-                        for item in produtos_ia:
-                            produto = produto_valido(item, ignorar_lista)
-                            if produto:
-                                produtos_por_codigo[produto["codigo"]] = produto
-
-            return list(produtos_por_codigo.values())
-
-        melhor_crop = {
-            "top_crop_pct": top_crop_pct,
-            "bottom_crop_pct": bottom_crop_pct,
-            "produtos_detectados": 0
-        }
+        melhor_crop = None
 
         if auto_crop:
             test_index = max(test_page - 1, 0)
@@ -366,32 +373,37 @@ async def parse_catalog_vision(
             tops = [0.0, 0.08, 0.13, 0.18, 0.22]
             bottoms = [0.0, 0.02, 0.05]
 
-            melhor_resultado = []
+            melhor_qtd = -1
 
             for top in tops:
                 for bottom in bottoms:
                     print(f"Testando crop top={top} bottom={bottom}")
 
-                    resultado_teste = processar_pagina(
+                    resultado = processar_pagina(
+                        doc=doc,
                         page_index=test_index,
-                        top_crop=top,
-                        bottom_crop=bottom
+                        openai_key=openai_key,
+                        layout=layout,
+                        colunas=colunas,
+                        linhas=linhas,
+                        top_crop_pct=top,
+                        bottom_crop_pct=bottom,
+                        ignorar_lista=ignorar_lista,
                     )
 
-                    qtd = len(resultado_teste)
+                    qtd = len(resultado)
 
                     print(f"Crop top={top} bottom={bottom} encontrou {qtd}")
 
-                    if qtd > melhor_crop["produtos_detectados"]:
+                    if qtd > melhor_qtd:
+                        melhor_qtd = qtd
+                        top_crop_pct = top
+                        bottom_crop_pct = bottom
                         melhor_crop = {
                             "top_crop_pct": top,
                             "bottom_crop_pct": bottom,
-                            "produtos_detectados": qtd
+                            "produtos_detectados": qtd,
                         }
-                        melhor_resultado = resultado_teste
-
-            top_crop_pct = melhor_crop["top_crop_pct"]
-            bottom_crop_pct = melhor_crop["bottom_crop_pct"]
 
         produtos_por_codigo_final = {}
 
@@ -399,10 +411,18 @@ async def parse_catalog_vision(
         end_index = min(start_index + max_pages, total_pages)
 
         for page_index in range(start_index, end_index):
+            print(f"Processando página {page_index + 1}")
+
             produtos_pagina = processar_pagina(
+                doc=doc,
                 page_index=page_index,
-                top_crop=top_crop_pct,
-                bottom_crop=bottom_crop_pct
+                openai_key=openai_key,
+                layout=layout,
+                colunas=colunas,
+                linhas=linhas,
+                top_crop_pct=top_crop_pct,
+                bottom_crop_pct=bottom_crop_pct,
+                ignorar_lista=ignorar_lista,
             )
 
             for produto in produtos_pagina:
@@ -412,8 +432,19 @@ async def parse_catalog_vision(
         gc.collect()
 
         return {
-            "auto_crop": melhor_crop if auto_crop else None,
-            "produtos": list(produtos_por_codigo_final.values())
+            "auto_crop": melhor_crop,
+            "config_usada": {
+                "layout": layout,
+                "colunas": colunas,
+                "linhas": linhas,
+                "start_page": start_page,
+                "max_pages": max_pages,
+                "top_crop_pct": top_crop_pct,
+                "bottom_crop_pct": bottom_crop_pct,
+                "auto_crop": auto_crop,
+                "test_page": test_page,
+            },
+            "produtos": list(produtos_por_codigo_final.values()),
         }
 
     except Exception as e:

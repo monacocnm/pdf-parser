@@ -239,6 +239,9 @@ async def parse_catalog_vision(
     top_crop_pct: float = Query(0.0),
     bottom_crop_pct: float = Query(0.0),
 
+    auto_crop: bool = Query(False),
+    test_page: int = Query(1),
+
     ignorar_palavras: str = Query("reposicao,reposição,novidades,categoria")
 ):
     try:
@@ -255,23 +258,18 @@ async def parse_catalog_vision(
 
         total_pages = len(doc)
 
-        start_index = max(start_page - 1, 0)
-        end_index = min(start_index + max_pages, total_pages)
-
         ignorar_lista = [
             p.strip().lower()
             for p in ignorar_palavras.split(",")
             if p.strip()
         ]
 
-        produtos_por_codigo = {}
-
-        for page_index in range(start_index, end_index):
+        def processar_pagina(page_index, top_crop, bottom_crop):
             page = doc[page_index]
             page_rect = page.rect
 
-            usable_y0 = page_rect.y0 + (page_rect.height * top_crop_pct)
-            usable_y1 = page_rect.y1 - (page_rect.height * bottom_crop_pct)
+            usable_y0 = page_rect.y0 + (page_rect.height * top_crop)
+            usable_y1 = page_rect.y1 - (page_rect.height * bottom_crop)
 
             usable_rect = fitz.Rect(
                 page_rect.x0,
@@ -280,7 +278,7 @@ async def parse_catalog_vision(
                 usable_y1,
             )
 
-            print(f"Processando página {page_index + 1} layout={layout}")
+            produtos_por_codigo = {}
 
             if layout == "pagina_inteira":
                 pix = page.get_pixmap(
@@ -336,7 +334,6 @@ async def parse_catalog_vision(
                             continue
 
                         img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-
                         del img_bytes
 
                         produtos_ia = chamar_ia(
@@ -354,10 +351,70 @@ async def parse_catalog_vision(
                             if produto:
                                 produtos_por_codigo[produto["codigo"]] = produto
 
+            return list(produtos_por_codigo.values())
+
+        melhor_crop = {
+            "top_crop_pct": top_crop_pct,
+            "bottom_crop_pct": bottom_crop_pct,
+            "produtos_detectados": 0
+        }
+
+        if auto_crop:
+            test_index = max(test_page - 1, 0)
+            test_index = min(test_index, total_pages - 1)
+
+            tops = [0.0, 0.08, 0.13, 0.18, 0.22]
+            bottoms = [0.0, 0.02, 0.05]
+
+            melhor_resultado = []
+
+            for top in tops:
+                for bottom in bottoms:
+                    print(f"Testando crop top={top} bottom={bottom}")
+
+                    resultado_teste = processar_pagina(
+                        page_index=test_index,
+                        top_crop=top,
+                        bottom_crop=bottom
+                    )
+
+                    qtd = len(resultado_teste)
+
+                    print(f"Crop top={top} bottom={bottom} encontrou {qtd}")
+
+                    if qtd > melhor_crop["produtos_detectados"]:
+                        melhor_crop = {
+                            "top_crop_pct": top,
+                            "bottom_crop_pct": bottom,
+                            "produtos_detectados": qtd
+                        }
+                        melhor_resultado = resultado_teste
+
+            top_crop_pct = melhor_crop["top_crop_pct"]
+            bottom_crop_pct = melhor_crop["bottom_crop_pct"]
+
+        produtos_por_codigo_final = {}
+
+        start_index = max(start_page - 1, 0)
+        end_index = min(start_index + max_pages, total_pages)
+
+        for page_index in range(start_index, end_index):
+            produtos_pagina = processar_pagina(
+                page_index=page_index,
+                top_crop=top_crop_pct,
+                bottom_crop=bottom_crop_pct
+            )
+
+            for produto in produtos_pagina:
+                produtos_por_codigo_final[produto["codigo"]] = produto
+
         doc.close()
         gc.collect()
 
-        return list(produtos_por_codigo.values())
+        return {
+            "auto_crop": melhor_crop if auto_crop else None,
+            "produtos": list(produtos_por_codigo_final.values())
+        }
 
     except Exception as e:
         print("ERRO GERAL:", str(e))
